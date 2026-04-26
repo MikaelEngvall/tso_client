@@ -1,0 +1,70 @@
+The memory management in this app could be improved. Considere these proposals.
+
+**1. `SHA1.Create()` leaking in `checkVersion`**
+
+`SHA1.Create()` is `IDisposable` and never disposed:
+```csharp
+// bad
+chksum = BitConverter.ToString(SHA1.Create().ComputeHash(ms.ToArray())).ToLower().Replace("-", "");
+
+// fix
+using (var sha1 = SHA1.Create())
+    chksum = BitConverter.ToString(sha1.ComputeHash(ms.ToArray())).ToLower().Replace("-", "");
+```
+
+**2. `MemoryStream` not disposed in `Deserialize<T>`** (both `Main` and `login`)
+
+```csharp
+// fix - wrap in using
+public static T Deserialize<T>(string aJSON) where T : new()
+{
+    using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(aJSON)))
+    {
+        var ser = new DataContractJsonSerializer(typeof(T));
+        return (T)ser.ReadObject(ms);
+    }
+}
+```
+
+**3. `DownloadFile` builds a `List<byte>` with `AddRange` on every chunk**
+
+This causes repeated allocations and copies. Use a `MemoryStream` instead:
+```csharp
+using (var ms = new MemoryStream())
+{
+    byte[] buffer = new byte[4096];
+    int bytesRead;
+    while ((bytesRead = remoteStream.Read(buffer, 0, buffer.Length)) > 0)
+    {
+        ms.Write(buffer, 0, bytesRead);
+        // update progress...
+    }
+    return ms.ToArray();
+}
+```
+
+**4. `GC.Collect()` calls in `login_Closing` and `settings.login_Closing`**
+
+Manually calling `GC.Collect()` on window close is a code smell — it doesn't help and can actually hurt performance by forcing a full blocking collection at the wrong time. Just remove them and let the GC do its job.
+
+**5. `PostDataBC` builds the response by string concatenation in a loop**
+
+```csharp
+// bad - O(n²) allocations
+response += Encoding.ASCII.GetString(buff, 0, totalRead);
+
+// fix
+var sb = new StringBuilder();
+sb.Append(Encoding.ASCII.GetString(buff, 0, totalRead));
+// then: sb.ToString()
+```
+
+**6. `new Random()` inside a loop in `PostData`**
+
+Creating `new Random()` repeatedly in a tight retry loop can produce the same seed and wastes allocations. Use a static instance:
+```csharp
+private static readonly Random _rand = new Random();
+// then use _rand.Next(...) instead of new Random().Next(...)
+```
+
+The biggest real-world impact will be fixes 2 and 3 — the `MemoryStream` leaks and the `List<byte>` chunk copying are the most likely culprits for memory growth during normal use.
